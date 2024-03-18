@@ -42,6 +42,7 @@ bench_bench_bitcoin_SOURCES = \
   bench/merkle_root.cpp \
   bench/nanobench.cpp \
   bench/nanobench.h \
+  bench/parse_hex.cpp \
   bench/peer_eviction.cpp \
   bench/poly1305.cpp \
   bench/pool.cpp \
@@ -88,6 +89,8 @@ bench_bench_bitcoin_SOURCES += bench/wallet_balance.cpp
 bench_bench_bitcoin_SOURCES += bench/wallet_create.cpp
 bench_bench_bitcoin_SOURCES += bench/wallet_loading.cpp
 bench_bench_bitcoin_SOURCES += bench/wallet_create_tx.cpp
+bench_bench_bitcoin_SOURCES += bench/wallet_ismine.cpp
+
 bench_bench_bitcoin_LDADD += $(BDB_LIBS) $(SQLITE_LIBS)
 endif
 

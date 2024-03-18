@@ -2,6 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#if defined(HAVE_CONFIG_H)
+#include <config/bitcoin-config.h>
+#endif
+
 #include <boost/test/unit_test.hpp>
 
 #include <test/util/setup_common.h>
@@ -225,6 +229,39 @@ BOOST_AUTO_TEST_CASE(db_availability_after_write_error)
         std::string read_value;
         BOOST_CHECK(batch->Read(key, read_value));
         BOOST_CHECK_EQUAL(read_value, value2);
+    }
+}
+
+// Verify 'ErasePrefix' functionality using db keys similar to the ones used by the wallet.
+// Keys are in the form of std::pair<TYPE, ENTRY_ID>
+BOOST_AUTO_TEST_CASE(erase_prefix)
+{
+    const std::string key = "key";
+    const std::string key2 = "key2";
+    const std::string value = "value";
+    const std::string value2 = "value_2";
+    auto make_key = [](std::string type, std::string id) { return std::make_pair(type, id); };
+
+    for (const auto& database : TestDatabases(m_path_root)) {
+        std::unique_ptr<DatabaseBatch> batch = database->MakeBatch();
+
+        // Write two entries with the same key type prefix, a third one with a different prefix
+        // and a fourth one with the type-id values inverted
+        BOOST_CHECK(batch->Write(make_key(key, value), value));
+        BOOST_CHECK(batch->Write(make_key(key, value2), value2));
+        BOOST_CHECK(batch->Write(make_key(key2, value), value));
+        BOOST_CHECK(batch->Write(make_key(value, key), value));
+
+        // Erase the ones with the same prefix and verify result
+        BOOST_CHECK(batch->TxnBegin());
+        BOOST_CHECK(batch->ErasePrefix(DataStream() << key));
+        BOOST_CHECK(batch->TxnCommit());
+
+        BOOST_CHECK(!batch->Exists(make_key(key, value)));
+        BOOST_CHECK(!batch->Exists(make_key(key, value2)));
+        // Also verify that entries with a different prefix were not erased
+        BOOST_CHECK(batch->Exists(make_key(key2, value)));
+        BOOST_CHECK(batch->Exists(make_key(value, key)));
     }
 }
 

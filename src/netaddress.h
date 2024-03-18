@@ -5,10 +5,6 @@
 #ifndef BITCOIN_NETADDRESS_H
 #define BITCOIN_NETADDRESS_H
 
-#if defined(HAVE_CONFIG_H)
-#include <config/bitcoin-config.h>
-#endif
-
 #include <compat/compat.h>
 #include <crypto/siphash.h>
 #include <prevector.h>
@@ -544,6 +540,11 @@ public:
     uint16_t GetPort() const;
     bool GetSockAddr(struct sockaddr* paddr, socklen_t* addrlen) const;
     bool SetSockAddr(const struct sockaddr* paddr);
+    /**
+     * Get the address family
+     * @returns AF_UNSPEC if unspecified
+     */
+    [[nodiscard]] sa_family_t GetSAFamily() const;
     friend bool operator==(const CService& a, const CService& b);
     friend bool operator!=(const CService& a, const CService& b) { return !(a == b); }
     friend bool operator<(const CService& a, const CService& b);

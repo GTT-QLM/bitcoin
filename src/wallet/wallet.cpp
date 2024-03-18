@@ -1571,11 +1571,22 @@ isminetype CWallet::IsMine(const CTxDestination& dest) const
 isminetype CWallet::IsMine(const CScript& script) const
 {
     AssertLockHeld(cs_wallet);
-    isminetype result = ISMINE_NO;
-    for (const auto& spk_man_pair : m_spk_managers) {
-        result = std::max(result, spk_man_pair.second->IsMine(script));
+
+    // Search the cache so that IsMine is called only on the relevant SPKMs instead of on everything in m_spk_managers
+    const auto& it = m_cached_spks.find(script);
+    if (it != m_cached_spks.end()) {
+        isminetype res = ISMINE_NO;
+        for (const auto& spkm : it->second) {
+            res = std::max(res, spkm->IsMine(script));
+        }
+        Assume(res == ISMINE_SPENDABLE);
+        return res;
     }
-    return result;
+
+    // Legacy wallet
+    if (IsLegacy()) return GetLegacyScriptPubKeyMan()->IsMine(script);
+
+    return ISMINE_NO;
 }
 
 bool CWallet::IsMine(const CTransaction& tx) const
@@ -2320,12 +2331,41 @@ DBErrors CWallet::LoadWallet()
     return nLoadWalletRet;
 }
 
-DBErrors CWallet::ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256>& vHashOut)
+util::Result<void> CWallet::RemoveTxs(std::vector<uint256>& txs_to_remove)
 {
     AssertLockHeld(cs_wallet);
-    DBErrors nZapSelectTxRet = WalletBatch(GetDatabase()).ZapSelectTx(vHashIn, vHashOut);
-    for (const uint256& hash : vHashOut) {
-        const auto& it = mapWallet.find(hash);
+    WalletBatch batch(GetDatabase());
+    if (!batch.TxnBegin()) return util::Error{_("Error starting db txn for wallet transactions removal")};
+
+    // Check for transaction existence and remove entries from disk
+    using TxIterator = std::unordered_map<uint256, CWalletTx, SaltedTxidHasher>::const_iterator;
+    std::vector<TxIterator> erased_txs;
+    bilingual_str str_err;
+    for (const uint256& hash : txs_to_remove) {
+        auto it_wtx = mapWallet.find(hash);
+        if (it_wtx == mapWallet.end()) {
+            str_err = strprintf(_("Transaction %s does not belong to this wallet"), hash.GetHex());
+            break;
+        }
+        if (!batch.EraseTx(hash)) {
+            str_err = strprintf(_("Failure removing transaction: %s"), hash.GetHex());
+            break;
+        }
+        erased_txs.emplace_back(it_wtx);
+    }
+
+    // Roll back removals in case of an error
+    if (!str_err.empty()) {
+        batch.TxnAbort();
+        return util::Error{str_err};
+    }
+
+    // Dump changes to disk
+    if (!batch.TxnCommit()) return util::Error{_("Error committing db txn for wallet transactions removal")};
+
+    // Update the in-memory state and notify upper layers about the removals
+    for (const auto& it : erased_txs) {
+        const uint256 hash{it->first};
         wtxOrdered.erase(it->second.m_it_wtxOrdered);
         for (const auto& txin : it->second.tx->vin)
             mapTxSpends.erase(txin.prevout);
@@ -2333,22 +2373,9 @@ DBErrors CWallet::ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256
         NotifyTransactionChanged(hash, CT_DELETED);
     }
 
-    if (nZapSelectTxRet == DBErrors::NEED_REWRITE)
-    {
-        if (GetDatabase().Rewrite("\x04pool"))
-        {
-            for (const auto& spk_man_pair : m_spk_managers) {
-                spk_man_pair.second->RewriteDB();
-            }
-        }
-    }
-
-    if (nZapSelectTxRet != DBErrors::LOAD_OK)
-        return nZapSelectTxRet;
-
     MarkDirty();
 
-    return DBErrors::LOAD_OK;
+    return {}; // all good
 }
 
 bool CWallet::SetAddressBookWithDB(WalletBatch& batch, const CTxDestination& address, const std::string& strName, const std::optional<AddressPurpose>& new_purpose)
@@ -2395,8 +2422,9 @@ bool CWallet::SetAddressBook(const CTxDestination& address, const std::string& s
 
 bool CWallet::DelAddressBook(const CTxDestination& address)
 {
-    WalletBatch batch(GetDatabase());
-    return DelAddressBookWithDB(batch, address);
+    return RunWithinTxn(GetDatabase(), /*process_desc=*/"address book entry removal", [&](WalletBatch& batch){
+        return DelAddressBookWithDB(batch, address);
+    });
 }
 
 bool CWallet::DelAddressBookWithDB(WalletBatch& batch, const CTxDestination& address)
@@ -2579,8 +2607,10 @@ util::Result<CTxDestination> ReserveDestination::GetReservedDestination(bool int
 
     if (nIndex == -1) {
         CKeyPool keypool;
-        auto op_address = m_spk_man->GetReservedDestination(type, internal, nIndex, keypool);
+        int64_t index;
+        auto op_address = m_spk_man->GetReservedDestination(type, internal, index, keypool);
         if (!op_address) return op_address;
+        nIndex = index;
         address = *op_address;
         fInternal = keypool.fInternal;
     }
@@ -3457,12 +3487,18 @@ ScriptPubKeyMan* CWallet::GetScriptPubKeyMan(const OutputType& type, bool intern
 std::set<ScriptPubKeyMan*> CWallet::GetScriptPubKeyMans(const CScript& script) const
 {
     std::set<ScriptPubKeyMan*> spk_mans;
-    SignatureData sigdata;
-    for (const auto& spk_man_pair : m_spk_managers) {
-        if (spk_man_pair.second->CanProvide(script, sigdata)) {
-            spk_mans.insert(spk_man_pair.second.get());
-        }
+
+    // Search the cache for relevant SPKMs instead of iterating m_spk_managers
+    const auto& it = m_cached_spks.find(script);
+    if (it != m_cached_spks.end()) {
+        spk_mans.insert(it->second.begin(), it->second.end());
     }
+    SignatureData sigdata;
+    Assume(std::all_of(spk_mans.begin(), spk_mans.end(), [&script, &sigdata](ScriptPubKeyMan* spkm) { return spkm->CanProvide(script, sigdata); }));
+
+    // Legacy wallet
+    if (IsLegacy() && GetLegacyScriptPubKeyMan()->CanProvide(script, sigdata)) spk_mans.insert(GetLegacyScriptPubKeyMan());
+
     return spk_mans;
 }
 
@@ -3482,11 +3518,17 @@ std::unique_ptr<SigningProvider> CWallet::GetSolvingProvider(const CScript& scri
 
 std::unique_ptr<SigningProvider> CWallet::GetSolvingProvider(const CScript& script, SignatureData& sigdata) const
 {
-    for (const auto& spk_man_pair : m_spk_managers) {
-        if (spk_man_pair.second->CanProvide(script, sigdata)) {
-            return spk_man_pair.second->GetSolvingProvider(script);
-        }
+    // Search the cache for relevant SPKMs instead of iterating m_spk_managers
+    const auto& it = m_cached_spks.find(script);
+    if (it != m_cached_spks.end()) {
+        // All spkms for a given script must already be able to make a SigningProvider for the script, so just return the first one.
+        Assume(it->second.at(0)->CanProvide(script, sigdata));
+        return it->second.at(0)->GetSolvingProvider(script);
     }
+
+    // Legacy wallet
+    if (IsLegacy() && GetLegacyScriptPubKeyMan()->CanProvide(script, sigdata)) return GetLegacyScriptPubKeyMan()->GetSolvingProvider(script);
+
     return nullptr;
 }
 
@@ -3565,15 +3607,16 @@ void CWallet::ConnectScriptPubKeyManNotifiers()
     }
 }
 
-void CWallet::LoadDescriptorScriptPubKeyMan(uint256 id, WalletDescriptor& desc)
+DescriptorScriptPubKeyMan& CWallet::LoadDescriptorScriptPubKeyMan(uint256 id, WalletDescriptor& desc)
 {
+    DescriptorScriptPubKeyMan* spk_manager;
     if (IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
-        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, desc, m_keypool_size));
-        AddScriptPubKeyMan(id, std::move(spk_manager));
+        spk_manager = new ExternalSignerScriptPubKeyMan(*this, desc, m_keypool_size);
     } else {
-        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, desc, m_keypool_size));
-        AddScriptPubKeyMan(id, std::move(spk_manager));
+        spk_manager = new DescriptorScriptPubKeyMan(*this, desc, m_keypool_size);
     }
+    AddScriptPubKeyMan(id, std::unique_ptr<ScriptPubKeyMan>(spk_manager));
+    return *spk_manager;
 }
 
 void CWallet::SetupDescriptorScriptPubKeyMans(const CExtKey& master_key)
@@ -3928,6 +3971,8 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
         if (ExtractDestination(script, dest)) not_migrated_dests.emplace(dest);
     }
 
+    Assume(!m_cached_spks.empty());
+
     for (auto& desc_spkm : data.desc_spkms) {
         if (m_spk_managers.count(desc_spkm->GetID()) > 0) {
             error = _("Error: Duplicate descriptors created during migration. Your wallet may be corrupted.");
@@ -4025,18 +4070,9 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
     watchonly_batch.reset(); // Flush
     // Do the removes
     if (txids_to_delete.size() > 0) {
-        std::vector<uint256> deleted_txids;
-        if (ZapSelectTx(txids_to_delete, deleted_txids) != DBErrors::LOAD_OK) {
-            error = _("Error: Could not delete watchonly transactions");
+        if (auto res = RemoveTxs(txids_to_delete); !res) {
+            error = _("Error: Could not delete watchonly transactions. ") + util::ErrorString(res);
             return false;
-        }
-        if (deleted_txids != txids_to_delete) {
-            error = _("Error: Not all watchonly txs could be deleted");
-            return false;
-        }
-        // Tell the GUI of each tx
-        for (const uint256& txid : deleted_txids) {
-            NotifyTransactionChanged(txid, CT_UPDATED);
         }
     }
 
@@ -4300,7 +4336,7 @@ util::Result<MigrationResult> MigrateLegacyToDescriptor(const std::string& walle
 
     // Make a backup of the DB
     fs::path this_wallet_dir = fs::absolute(fs::PathFromString(local_wallet->GetDatabase().Filename())).parent_path();
-    fs::path backup_filename = fs::PathFromString(strprintf("%s-%d.legacy.bak", wallet_name, GetTime()));
+    fs::path backup_filename = fs::PathFromString(strprintf("%s_%d.legacy.bak", (wallet_name.empty() ? "default_wallet" : wallet_name), GetTime()));
     fs::path backup_path = this_wallet_dir / backup_filename;
     if (!local_wallet->BackupWallet(fs::PathToString(backup_path))) {
         if (was_loaded) {
@@ -4419,5 +4455,18 @@ util::Result<MigrationResult> MigrateLegacyToDescriptor(const std::string& walle
         return util::Error{error};
     }
     return res;
+}
+
+void CWallet::CacheNewScriptPubKeys(const std::set<CScript>& spks, ScriptPubKeyMan* spkm)
+{
+    for (const auto& script : spks) {
+        m_cached_spks[script].push_back(spkm);
+    }
+}
+
+void CWallet::TopUpCallback(const std::set<CScript>& spks, ScriptPubKeyMan* spkm)
+{
+    // Update scriptPubKey cache
+    CacheNewScriptPubKeys(spks, spkm);
 }
 } // namespace wallet
