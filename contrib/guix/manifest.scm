@@ -110,12 +110,15 @@ desirable for building Bitcoin Core release binaries."
 
 (define (gcc-mingw-patches gcc)
   (package-with-extra-patches gcc
-    (search-our-patches "gcc-remap-guix-store.patch"
-                        "vmov-alignment.patch")))
+    (search-our-patches "gcc-remap-guix-store.patch")))
+
+(define (binutils-mingw-patches binutils)
+  (package-with-extra-patches binutils
+    (search-our-patches "binutils-unaligned-default.patch")))
 
 (define (make-mingw-pthreads-cross-toolchain target)
   "Create a cross-compilation toolchain package for TARGET"
-  (let* ((xbinutils (cross-binutils target))
+  (let* ((xbinutils (binutils-mingw-patches (cross-binutils target)))
          (pthreads-xlibc mingw-w64-x86_64-winpthreads)
          (pthreads-xgcc (cross-gcc target
                                     #:xgcc (gcc-mingw-patches mingw-w64-base-gcc)
@@ -423,6 +426,7 @@ inspecting signatures in Mach-O binaries.")
             (list "--enable-initfini-array=yes",
                   "--enable-default-ssp=yes",
                   "--enable-default-pie=yes",
+                  "--enable-standard-branch-protection=yes",
                   building-on)))
         ((#:phases phases)
           `(modify-phases ,phases
@@ -495,10 +499,10 @@ inspecting signatures in Mach-O binaries.")
         moreutils
         ;; Compression and archiving
         tar
-        bzip2
         gzip
         xz
         ;; Build tools
+        cmake-minimal
         gnu-make
         libtool
         autoconf-2.71
@@ -515,7 +519,6 @@ inspecting signatures in Mach-O binaries.")
     (cond ((string-suffix? "-mingw32" target)
            (list ;; Native GCC 12 toolchain
                  gcc-toolchain-12
-                 (list gcc-toolchain-12 "static")
                  zip
                  (make-mingw-pthreads-cross-toolchain "x86_64-w64-mingw32")
                  nsis-x86_64
@@ -527,12 +530,10 @@ inspecting signatures in Mach-O binaries.")
                  (list gcc-toolchain-12 "static")
                  (make-bitcoin-cross-toolchain target)))
           ((string-contains target "darwin")
-           (list ;; Native GCC 10 toolchain
-                 gcc-toolchain-10
-                 (list gcc-toolchain-10 "static")
+           (list ;; Native GCC 11 toolchain
+                 gcc-toolchain-11
                  binutils
                  clang-toolchain-17
-                 cmake-minimal
                  python-signapple
                  zip))
           (else '())))))

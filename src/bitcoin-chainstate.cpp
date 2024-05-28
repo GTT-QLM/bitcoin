@@ -26,6 +26,7 @@
 #include <script/sigcache.h>
 #include <util/chaintype.h>
 #include <util/fs.h>
+#include <util/signalinterrupt.h>
 #include <util/task_runner.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -89,14 +90,13 @@ int main(int argc, char* argv[])
         {
             std::cout << "Warning: " << warning.original << std::endl;
         }
-        void flushError(const std::string& debug_message) override
+        void flushError(const bilingual_str& message) override
         {
-            std::cerr << "Error flushing block data to disk: " << debug_message << std::endl;
+            std::cerr << "Error flushing block data to disk: " << message.original << std::endl;
         }
-        void fatalError(const std::string& debug_message, const bilingual_str& user_message) override
+        void fatalError(const bilingual_str& message) override
         {
-            std::cerr << "Error: " << debug_message << std::endl;
-            std::cerr << (user_message.empty() ? "A fatal internal error occurred." : user_message.original) << std::endl;
+            std::cerr << "Error: " << message.original << std::endl;
         }
     };
     auto notifications = std::make_unique<KernelNotifications>();
@@ -151,7 +151,7 @@ int main(int argc, char* argv[])
     {
         LOCK(chainman.GetMutex());
         std::cout
-        << "\t" << "Reindexing: " << std::boolalpha << node::fReindex.load() << std::noboolalpha << std::endl
+        << "\t" << "Reindexing: " << std::boolalpha << chainman.m_blockman.m_reindexing.load() << std::noboolalpha << std::endl
         << "\t" << "Snapshot Active: " << std::boolalpha << chainman.IsSnapshotActive() << std::noboolalpha << std::endl
         << "\t" << "Active Height: " << chainman.ActiveHeight() << std::endl
         << "\t" << "Active IBD: " << std::boolalpha << chainman.IsInitialBlockDownload() << std::noboolalpha << std::endl;

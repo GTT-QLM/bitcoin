@@ -27,6 +27,7 @@ import os
 import shutil
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.util import assert_equal
 
 DEFAULT_ASMAP_FILENAME = 'ip_asn.map' # defined in src/init.cpp
 ASMAP = '../../src/test/data/asmap.raw' # path to unit test skeleton asmap
@@ -39,7 +40,8 @@ def expected_messages(filename):
 class AsmapTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [["-checkaddrman=1"]]  # Do addrman checks on all operations.
+        # Do addrman checks on all operations and use deterministic addrman
+        self.extra_args = [["-checkaddrman=1", "-test=addrman"]]
 
     def fill_addrman(self, node_id):
         """Add 2 tried addresses to the addrman, followed by 2 new addresses."""
@@ -117,6 +119,14 @@ class AsmapTest(BitcoinTestFramework):
         msg = "ASMap Health Check: 4 clearnet peers are mapped to 3 ASNs with 0 peers being unmapped"
         with self.node.assert_debug_log(expected_msgs=[msg]):
             self.start_node(0, extra_args=['-asmap'])
+        raw_addrman = self.node.getrawaddrman()
+        asns = []
+        for _, entries in raw_addrman.items():
+            for _, entry in entries.items():
+                asn = entry['mapped_as']
+                if asn not in asns:
+                    asns.append(asn)
+        assert_equal(len(asns), 3)
         os.remove(self.default_asmap)
 
     def run_test(self):

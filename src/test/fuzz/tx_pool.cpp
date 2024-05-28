@@ -139,7 +139,6 @@ void CheckATMPInvariants(const MempoolAcceptResult& res, bool txid_in_mempool, b
         Assert(wtxid_in_mempool);
         Assert(res.m_state.IsValid());
         Assert(!res.m_state.IsInvalid());
-        Assert(res.m_replaced_transactions);
         Assert(res.m_vsize);
         Assert(res.m_base_fees);
         Assert(res.m_effective_feerate);
@@ -154,7 +153,6 @@ void CheckATMPInvariants(const MempoolAcceptResult& res, bool txid_in_mempool, b
         Assert(res.m_state.IsInvalid());
 
         const bool is_reconsiderable{res.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE};
-        Assert(!res.m_replaced_transactions);
         Assert(!res.m_vsize);
         Assert(!res.m_base_fees);
         // Fee information is provided if the failure is TX_RECONSIDERABLE.
@@ -291,7 +289,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         // Make sure ProcessNewPackage on one transaction works.
         // The result is not guaranteed to be the same as what is returned by ATMP.
         const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, {tx}, true, /*max_sane_feerate=*/{}));
+                                    return ProcessNewPackage(chainstate, tx_pool, {tx}, true, /*client_maxfeerate=*/{}));
         // If something went wrong due to a package-specific policy, it might not return a
         // validation result for the transaction.
         if (result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
